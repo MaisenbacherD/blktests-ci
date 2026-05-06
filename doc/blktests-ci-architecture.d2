@@ -1,0 +1,383 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Copyright (c) 2026 Western Digital Corporation or its affiliates.
+#
+# Authors: Dennis Maisenbacher (dennis.maisenbacher@wdc.com)
+#
+# blktests-ci Architecture Overview
+#
+# Render with: d2 --theme 0 blktests-ci-architecture.d2 output-light.png
+#              d2 --theme 200 blktests-ci-architecture.d2 output-dark.png
+
+direction: down
+
+# ──────────────────────────────────────────────
+# Font size variables — adjust here to rescale all text at once
+# ──────────────────────────────────────────────
+vars: {
+  d2-config: {
+    layout-engine: dagre
+  }
+
+  # Font sizes
+  font-cluster-title: 58
+  font-ns-title:      52
+  font-node:          50
+  font-vm:            48
+  font-edge:          48
+  font-external:      52
+}
+
+# ──────────────────────────────────────────────
+# External Services
+# ──────────────────────────────────────────────
+patchwork: Patchwork\n(linux-block mailing list) {
+  shape: rectangle
+  style: {
+    stroke: "#3b82f6"
+    stroke-width: 2
+    font-size: ${font-external}
+    bold: true
+  }
+}
+
+linux-block-repo: linux-block\nGitHub repo {
+  shape: rectangle
+  style: {
+    stroke: "#16a34a"
+    stroke-width: 2
+    font-size: ${font-external}
+    bold: true
+  }
+}
+
+nvme-cli-repo: nvme-cli\nGitHub repo {
+  shape: rectangle
+  style: {
+    stroke: "#16a34a"
+    stroke-width: 2
+    font-size: ${font-external}
+    bold: true
+  }
+}
+
+# ──────────────────────────────────────────────
+# k3s Cluster
+# ──────────────────────────────────────────────
+k3s: k3s Cluster {
+  style: {
+    stroke: "#475569"
+    stroke-width: 3
+    stroke-dash: 5
+    bold: true
+    font-size: ${font-cluster-title}
+  }
+
+  # ── kernel-patches-daemon namespace ──
+  kpd-ns: kernel-patches-daemon namespace {
+    style: {
+      stroke: "#ca8a04"
+      stroke-width: 2
+      stroke-dash: 5
+      font-size: ${font-ns-title}
+      bold: true
+    }
+    kpd: kernel-patches-daemon\n(watches Patchwork, creates PRs, leader election) {
+      style: {
+        stroke: "#ca8a04"
+        font-size: ${font-node}
+      }
+    }
+  }
+
+  # ── gh-runner-linux-block namespace ──
+  lb-ns: gh-runner-linux-block namespace {
+    style: {
+      stroke: "#3b82f6"
+      stroke-width: 2
+      stroke-dash: 5
+      font-size: ${font-ns-title}
+      bold: true
+    }
+
+    lb-runner: Self-hosted ARC runner pod\n(1. Build kernel  2. Run tests via SSH on VM) {
+      style: {
+        stroke: "#3b82f6"
+        font-size: ${font-node}
+      }
+    }
+    lb-kva: kubevirt-action\n(boots VM) {
+      style: {
+        stroke: "#3b82f6"
+        font-size: ${font-node}
+      }
+    }
+    lb-vm: |md
+      **Ephemeral KubeVirt VM**
+
+      1\. Boots Fedora cloud image with previously built kernel
+
+      2\. Runs blktests on PCIe passthrough NVMe SSDs via SSH
+    | {
+      style: {
+        stroke: "#3b82f6"
+        stroke-dash: 3
+        font-size: ${font-vm}
+      }
+    }
+
+    lb-runner -> lb-kva: {style.stroke-dash: 3}
+    lb-kva -> lb-vm: {style.stroke-dash: 3}
+  }
+
+  # ── gh-runner-nvme-cli namespace ──
+  nc-ns: gh-runner-nvme-cli namespace {
+    style: {
+      stroke: "#16a34a"
+      stroke-width: 2
+      stroke-dash: 5
+      font-size: ${font-ns-title}
+      bold: true
+    }
+
+    nc-runner: Self-hosted ARC runner pod\n(runs nvme-cli tests via SSH on VM) {
+      style: {
+        stroke: "#16a34a"
+        font-size: ${font-node}
+      }
+    }
+    nc-kva: kubevirt-action\n(boots VM) {
+      style: {
+        stroke: "#16a34a"
+        font-size: ${font-node}
+      }
+    }
+    nc-vm: |md
+      **Ephemeral KubeVirt VM**
+
+      1\. Boots Fedora cloud image with nightly built kernel
+
+      2\. Runs nvme-cli tests on PCIe passthrough NVMe SSDs via SSH
+    | {
+      style: {
+        stroke: "#16a34a"
+        stroke-dash: 3
+        font-size: ${font-vm}
+      }
+    }
+
+    nc-runner -> nc-kva: {style.stroke-dash: 3}
+    nc-kva -> nc-vm: {style.stroke-dash: 3}
+  }
+
+  # ── arc-systems namespace ──
+  arc-ns: arc-systems namespace {
+    style: {
+      stroke: "#9333ea"
+      stroke-width: 2
+      stroke-dash: 5
+      font-size: ${font-ns-title}
+      bold: true
+    }
+
+    arc-ctrl: arc-scale-set-controller {
+      style: {
+        stroke: "#9333ea"
+        font-size: ${font-node}
+      }
+    }
+    lb-listener: arc-vm-linux-block\nrunner set listener {
+      style: {
+        stroke: "#9333ea"
+        font-size: ${font-node}
+      }
+    }
+    nc-listener: arc-vm-nvme-cli\nrunner set listener {
+      style: {
+        stroke: "#9333ea"
+        font-size: ${font-node}
+      }
+    }
+    more-listeners: "..." {
+      style: {
+        stroke: "#9333ea"
+        font-size: ${font-node}
+      }
+    }
+  }
+
+  # ── docker-registry namespace ──
+  reg-ns: docker-registry namespace {
+    style: {
+      stroke: "#ea580c"
+      stroke-width: 2
+      stroke-dash: 5
+      font-size: ${font-ns-title}
+      bold: true
+    }
+    registry: Private Container Registry {
+      shape: cylinder
+      style: {
+        stroke: "#ea580c"
+        font-size: ${font-node}
+      }
+    }
+  }
+
+  # ── gh-runner-kernel-builder namespace ──
+  kb-ns: gh-runner-kernel-builder namespace {
+    style: {
+      stroke: "#e11d48"
+      stroke-width: 2
+      stroke-dash: 5
+      font-size: ${font-ns-title}
+      bold: true
+    }
+    kb-cron: kernel-builder CronJob (nightly) {
+      style: {
+        stroke: "#e11d48"
+        font-size: ${font-node}
+      }
+    }
+  }
+
+  # ── logging namespace ──
+  log-ns: logging namespace {
+    style: {
+      stroke: "#0d9488"
+      stroke-width: 2
+      stroke-dash: 5
+      font-size: ${font-ns-title}
+      bold: true
+    }
+    log-stack: Grafana + Loki + Alloy\n(log aggregation) {
+      style: {
+        stroke: "#0d9488"
+        font-size: ${font-node}
+      }
+    }
+  }
+
+  # ── Infrastructure Services ──
+  infra: Infrastructure Services {
+    style: {
+      stroke: "#475569"
+      stroke-width: 2
+      stroke-dash: 5
+      font-size: ${font-ns-title}
+      bold: true
+    }
+    grid-rows: 1
+
+    kubevirt: KubeVirt + CDI {
+      style: {
+        stroke: "#475569"
+        font-size: ${font-node}
+      }
+    }
+    longhorn: Longhorn {
+      style: {
+        stroke: "#475569"
+        font-size: ${font-node}
+      }
+    }
+    rook-ceph: Rook-Ceph {
+      style: {
+        stroke: "#475569"
+        font-size: ${font-node}
+      }
+    }
+    mitmproxy: mitmproxy (optional) {
+      style: {
+        stroke: "#475569"
+        stroke-dash: 3
+        font-size: ${font-node}
+      }
+    }
+  }
+
+  # ── Physical Nodes ──
+  nodes: |md
+    **Bare Metal Nodes** (Dell R6525, Ubuntu 22.04) —
+    PCIe NVMe SSDs bound to vfio-pci driver for VM passthrough
+  | {
+    style: {
+      stroke: "#475569"
+      stroke-width: 2
+      font-size: ${font-node}
+    }
+  }
+
+  # Force vertical stacking for bottom sections
+  reg-ns -> kb-ns: {style.opacity: 0}
+  kb-ns -> log-ns: {style.opacity: 0}
+  log-ns -> infra: {style.opacity: 0}
+  infra -> nodes: {style.opacity: 0}
+}
+
+# ──────────────────────────────────────────────
+# Connections (external → cluster)
+# ──────────────────────────────────────────────
+
+patchwork -> k3s.kpd-ns.kpd: monitors patches {
+  style: {
+    font-size: ${font-edge}
+    stroke: "#3b82f6"
+  }
+}
+k3s.kpd-ns.kpd -> linux-block-repo: creates PR with\npatch to test {
+  style: {
+    font-size: ${font-edge}
+    stroke: "#ca8a04"
+  }
+}
+linux-block-repo -> k3s.arc-ns.lb-listener: PR triggers workflow {
+  style: {
+    font-size: ${font-edge}
+    stroke: "#16a34a"
+  }
+}
+nvme-cli-repo -> k3s.arc-ns.nc-listener: scheduled workflow trigger {
+  style: {
+    font-size: ${font-edge}
+    stroke: "#16a34a"
+  }
+}
+
+# ──────────────────────────────────────────────
+# Connections (within cluster)
+# ──────────────────────────────────────────────
+
+k3s.arc-ns.lb-listener -> k3s.lb-ns.lb-runner: spawns {
+  style.font-size: ${font-edge}
+}
+k3s.arc-ns.nc-listener -> k3s.nc-ns.nc-runner: spawns {
+  style.font-size: ${font-edge}
+}
+
+k3s.lb-ns.lb-runner -> k3s.reg-ns.registry: pushes container image\n(kernel + initramfs) {
+  style: {
+    font-size: ${font-edge}
+    stroke: "#ea580c"
+  }
+}
+k3s.lb-ns.lb-vm -> k3s.reg-ns.registry: fetches kernel image {
+  style: {
+    stroke-dash: 3
+    font-size: ${font-edge}
+    stroke: "#ea580c"
+  }
+}
+k3s.nc-ns.nc-vm -> k3s.reg-ns.registry: fetches kernel image {
+  style: {
+    stroke-dash: 3
+    font-size: ${font-edge}
+    stroke: "#ea580c"
+  }
+}
+k3s.kb-ns.kb-cron -> k3s.reg-ns.registry: nightly build pushes\ncontainer image {
+  style: {
+    font-size: ${font-edge}
+    stroke: "#e11d48"
+  }
+}
