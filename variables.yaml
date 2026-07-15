@@ -4,6 +4,29 @@
 #
 # Authors: Dennis Maisenbacher (dennis.maisenbacher@wdc.com)
 
+# Kubeconfig that every playbook and helper script (redeploy.py) uses to reach
+# the target cluster from the workstation. It is exported as KUBECONFIG (for
+# kubectl/helm/virtctl) and K8S_AUTH_KUBECONFIG (for the kubernetes.core Ansible
+# modules) on the localhost plays, so a single value drives every cluster
+# interaction. A leading "~" is expanded to the invoking user's home directory.
+#
+# Defaults to the regular ~/.kube/config. To run a staging and a prod cluster
+# side by side, keep one kubeconfig file per cluster and check out this repo
+# into one worktree (branch) per cluster, each setting this to its own file:
+#   kubeconfig: "~/.kube/config-prod"      # in the prod worktree/branch
+#   kubeconfig: "~/.kube/config-staging"   # in the staging worktree/branch
+kubeconfig: "~/.kube/config"
+
+# Scratch directory on the workstation where the playbooks stage rendered
+# manifests, downloaded release YAMLs and git checkouts before applying them to
+# the cluster. It is derived from the kubeconfig's file name so each
+# cluster/worktree gets its own private directory (e.g. ~/tmp-ansible-config-prod),
+# which keeps a staging run from reusing a prod run's staged files and vice
+# versa. Give each cluster a distinctly named kubeconfig (config-prod,
+# config-staging, ...); if two kubeconfigs share a file name, set this to an
+# explicit, distinct path per worktree instead.
+ansible_tmp_dir: "~/tmp-ansible-{{ kubeconfig | default('~/.kube/config', true) | basename }}"
+
 #Longhorn
 longhorn_helm_chart_url: "https://charts.longhorn.io"
 longhorn_version: "1.11.0"

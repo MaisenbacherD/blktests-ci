@@ -9,8 +9,11 @@
 
 Run this from a workstation that has pulled the latest changes and has the
 Ansible variables and secrets in place (``variables.yaml``, ``secrets.enc`` and
-``k8s-inventory.yaml``), with ``kubectl``/``helm`` pointed at the target
-cluster. It performs a redeploy in two steps:
+``k8s-inventory.yaml``). The target cluster is chosen by the ``kubeconfig`` value
+in ``variables.yaml`` (or ``--kubeconfig``); that path is exported for this
+script's own ``kubectl``/``helm`` calls and for the ansible-playbook runs, so a
+staging and a prod worktree each drive their own cluster. It performs a redeploy
+in two steps:
 
   1. Re-run ``playbooks/install-k8s-requirements.yaml`` to refresh the
      cluster-wide components (longhorn, KubeVirt, registry, logging, mitmproxy,
@@ -67,6 +70,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
 INVENTORY = REPO_ROOT / "k8s-inventory.yaml"
+VARIABLES = REPO_ROOT / "variables.yaml"
 INSTALL_PLAYBOOK = REPO_ROOT / "playbooks" / "install-k8s-requirements.yaml"
 GITHUB_PLAYBOOK = REPO_ROOT / "playbooks" / "setup-github-runner-scale-set.yaml"
 GITLAB_PLAYBOOK = REPO_ROOT / "playbooks" / "setup-gitlab-runner-scale-set.yaml"
@@ -171,6 +175,63 @@ def preflight() -> None:
     for path in (INVENTORY, INSTALL_PLAYBOOK, GITHUB_PLAYBOOK, GITLAB_PLAYBOOK):
         if not path.exists():
             raise RedeployError(f"expected repo file is missing: {path}")
+
+
+# --------------------------------------------------------------------------- #
+# Kubeconfig
+# --------------------------------------------------------------------------- #
+
+_VARIABLES_KUBECONFIG_RE = re.compile(
+    r'''(?m)^kubeconfig:\s*["']?([^"'#\n]+?)["']?\s*(?:#.*)?$'''
+)
+
+
+def _kubeconfig_from_variables() -> str | None:
+    """Best-effort read of the ``kubeconfig`` value from variables.yaml.
+
+    The playbooks read the same key, so redeploy must resolve it identically to
+    keep its own kubectl/helm calls pointed at the cluster the playbooks target.
+    Prefers PyYAML (a hard Ansible dependency) and falls back to a line scan so a
+    missing interpreter still works. Blank/whitespace-only values are treated as
+    unset, so the caller falls back to the default.
+    """
+    if not VARIABLES.exists():
+        return None
+    text = VARIABLES.read_text()
+    try:
+        import yaml
+    except ImportError:
+        yaml = None
+    if yaml is not None:
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError:
+            data = None
+        if isinstance(data, dict):
+            value = str(data.get("kubeconfig") or "").strip()
+            if value:
+                return value
+    match = _VARIABLES_KUBECONFIG_RE.search(text)
+    if match and match.group(1).strip():
+        return match.group(1).strip()
+    return None
+
+
+def resolve_kubeconfig(cli_value: str | None) -> tuple[str, str]:
+    """Resolve the kubeconfig path used for every cluster call.
+
+    Precedence: ``--kubeconfig`` > variables.yaml ``kubeconfig`` > ~/.kube/config.
+    Returns (absolute_path, source) where source is one of ``cli``, ``variables``
+    or ``default``. When the source is ``cli`` the value must also be forwarded to
+    the playbooks as an extra-var, because their play-level environment otherwise
+    re-derives KUBECONFIG from variables.yaml and would ignore the override.
+    """
+    if cli_value:
+        return os.path.abspath(os.path.expanduser(cli_value)), "cli"
+    from_vars = _kubeconfig_from_variables()
+    if from_vars:
+        return os.path.abspath(os.path.expanduser(from_vars)), "variables"
+    return os.path.abspath(os.path.expanduser("~/.kube/config")), "default"
 
 
 def ssh_agent_has_keys() -> tuple[bool, str]:
@@ -321,13 +382,15 @@ def terminate(scale_set: RunnerScaleSet, *, dry_run: bool) -> None:
             dry_run=dry_run, check=False)
 
 
-def recreate_argv(scale_set: RunnerScaleSet, *, relative: bool = False) -> list[str]:
+def recreate_argv(scale_set: RunnerScaleSet, *, relative: bool = False,
+                  kubeconfig: str | None = None) -> list[str]:
     """Build the ansible-playbook argv that recreates one scale set.
 
     Auth extra-vars are intentionally empty so the setup playbook reuses the
     existing secret instead of prompting. With ``relative=True`` the inventory
     and playbook paths are relative to the repo root, for a copy-pasteable
-    command in the overview manifest.
+    command in the overview manifest. ``kubeconfig`` is only passed when it was
+    overridden on the CLI; otherwise the playbook reads it from variables.yaml.
     """
     if scale_set.kind == GITHUB:
         extra_vars = {
@@ -344,6 +407,8 @@ def recreate_argv(scale_set: RunnerScaleSet, *, relative: bool = False) -> list[
             "gitlab_url": scale_set.config_url,
             "gitlab_runner_token": "",
         }
+    if kubeconfig:
+        extra_vars["kubeconfig"] = kubeconfig
     inventory = INVENTORY
     playbook = KIND_META[scale_set.kind]["playbook"]
     if relative:
@@ -353,10 +418,10 @@ def recreate_argv(scale_set: RunnerScaleSet, *, relative: bool = False) -> list[
             "-e", json.dumps(extra_vars)]
 
 
-def recreate(scale_set: RunnerScaleSet, *, dry_run: bool) -> None:
+def recreate(scale_set: RunnerScaleSet, *, dry_run: bool, kubeconfig: str | None = None) -> None:
     """Recreate one scale set via its setup playbook, reusing the auth secret."""
     _log(f"  -> redeploying {scale_set.label} ({scale_set.config_url})")
-    run(recreate_argv(scale_set), dry_run=dry_run)
+    run(recreate_argv(scale_set, kubeconfig=kubeconfig), dry_run=dry_run)
 
 
 # --------------------------------------------------------------------------- #
@@ -377,10 +442,13 @@ def _password_file(contents: str, registry: list[str]) -> str:
     return path
 
 
-def install_requirements(vault_pw: str | None, become_pw: str | None, *, dry_run: bool) -> None:
+def install_requirements(vault_pw: str | None, become_pw: str | None, *, dry_run: bool,
+                         kubeconfig: str | None = None) -> None:
     """Re-run install-k8s-requirements.yaml (reads secrets.enc, uses become)."""
     _log("  -> re-running install-k8s-requirements.yaml")
     cmd = ["ansible-playbook", "-i", str(INVENTORY), str(INSTALL_PLAYBOOK)]
+    if kubeconfig:
+        cmd += ["-e", json.dumps({"kubeconfig": kubeconfig})]
     tmp_files: list[str] = []
     try:
         if dry_run:
@@ -407,9 +475,14 @@ def install_requirements(vault_pw: str | None, become_pw: str | None, *, dry_run
 # Overview manifest
 # --------------------------------------------------------------------------- #
 
-def build_overview(scale_sets: list[RunnerScaleSet], *, reloaded_from: Path | None = None) -> str:
+def build_overview(scale_sets: list[RunnerScaleSet], *, reloaded_from: Path | None = None,
+                   kubeconfig: str | None = None, kubeconfig_is_override: bool = False) -> str:
     """Render the recovery manifest: every scale set and how to redeploy it by
     hand. The manifest can be fed back to the script with --from-log."""
+    # Only forward the kubeconfig to the by-hand commands when it was overridden
+    # on the CLI; otherwise those commands read it from variables.yaml like a
+    # normal run from this worktree.
+    cmd_kubeconfig = kubeconfig if kubeconfig_is_override else None
     line = "=" * 74
     out = [
         line,
@@ -417,6 +490,10 @@ def build_overview(scale_sets: list[RunnerScaleSet], *, reloaded_from: Path | No
         f"Captured: {datetime.now().isoformat(timespec='seconds')} (before any changes)",
         line,
     ]
+    if kubeconfig is not None:
+        origin = "--kubeconfig override" if kubeconfig_is_override else "variables.yaml"
+        out.append(f"Target cluster kubeconfig: {kubeconfig} (from {origin})")
+        out.append(line)
     if reloaded_from is not None:
         out.append(f"Loaded from {reloaded_from}; these runner scale sets are being redeployed.")
     else:
@@ -425,11 +502,16 @@ def build_overview(scale_sets: list[RunnerScaleSet], *, reloaded_from: Path | No
             "redeploy fails hard, redeploy any of them by hand from the repo root with",
             "the command shown, or feed this whole file back with --from-log.",
         ]
+    install_cmd = [
+        "  ansible-playbook -i k8s-inventory.yaml playbooks/install-k8s-requirements.yaml \\",
+    ]
+    if cmd_kubeconfig:
+        install_cmd.append(f"    -e kubeconfig={shlex.quote(cmd_kubeconfig)} \\")
+    install_cmd.append("    --ask-vault-pass --ask-become-pass")
     out += [
         "Auth is intentionally empty so the existing secret is reused.",
         "install-k8s-requirements.yaml is re-run separately with:",
-        "  ansible-playbook -i k8s-inventory.yaml playbooks/install-k8s-requirements.yaml \\",
-        "    --ask-vault-pass --ask-become-pass",
+        *install_cmd,
         line,
     ]
     if not scale_sets:
@@ -440,7 +522,7 @@ def build_overview(scale_sets: list[RunnerScaleSet], *, reloaded_from: Path | No
             f"    url:       {s.config_url}",
             f"    namespace: {s.namespace}",
             f"    release:   {s.release}",
-            f"    redeploy:  {shlex.join(recreate_argv(s, relative=True))}",
+            f"    redeploy:  {shlex.join(recreate_argv(s, relative=True, kubeconfig=cmd_kubeconfig))}",
             "",
         ]
     out.append(line)
@@ -448,10 +530,12 @@ def build_overview(scale_sets: list[RunnerScaleSet], *, reloaded_from: Path | No
 
 
 def emit_overview(scale_sets: list[RunnerScaleSet], overview_file: Path, *,
-                  dry_run: bool, reloaded_from: Path | None = None) -> None:
+                  dry_run: bool, reloaded_from: Path | None = None,
+                  kubeconfig: str | None = None, kubeconfig_is_override: bool = False) -> None:
     """Print the overview and, on a real run, persist it to the manifest file
     without ever overwriting an existing one."""
-    overview = build_overview(scale_sets, reloaded_from=reloaded_from)
+    overview = build_overview(scale_sets, reloaded_from=reloaded_from,
+                              kubeconfig=kubeconfig, kubeconfig_is_override=kubeconfig_is_override)
     _log(overview)
     if dry_run:
         _log(f"(dry-run: overview not written; a real run writes it to {overview_file})")
@@ -528,6 +612,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Comma-separated runner kinds to redeploy (github, gitlab).",
     )
     parser.add_argument(
+        "--kubeconfig", metavar="PATH", default=None,
+        help="Kubeconfig for the target cluster, used for this script's own "
+             "kubectl/helm calls and forwarded to the playbooks. Overrides the "
+             "'kubeconfig' value in variables.yaml (the default source).",
+    )
+    parser.add_argument(
         "--from-log", metavar="FILE", type=Path,
         help="Reload the runner scale sets recorded in a previous overview log and "
              "redeploy them (e.g. to resume after a failed run), instead of discovering "
@@ -581,6 +671,19 @@ def main(argv: list[str] | None = None) -> int:
 
     preflight()
 
+    # Resolve the target cluster's kubeconfig once and export it for every
+    # subprocess (kubectl/helm here, plus the ansible-playbook runs). Playbooks
+    # re-derive KUBECONFIG from variables.yaml on their localhost plays, so a
+    # CLI override is additionally forwarded to them as an extra-var below.
+    kubeconfig, kubeconfig_source = resolve_kubeconfig(args.kubeconfig)
+    kubeconfig_is_override = kubeconfig_source == "cli"
+    os.environ["KUBECONFIG"] = kubeconfig
+    os.environ["K8S_AUTH_KUBECONFIG"] = kubeconfig
+    kubeconfig_override = kubeconfig if kubeconfig_is_override else None
+    _log(f"Target cluster kubeconfig: {kubeconfig} (from {kubeconfig_source})")
+    if kubeconfig_source == "default" and args.kubeconfig is None:
+        _log("  note: 'kubeconfig' is not set in variables.yaml; using the default.")
+
     # install-k8s-requirements SSHes to the nodes; fail fast (before any
     # termination) if the agent has no key rather than dying mid-run.
     if not args.skip_install_requirements and not args.skip_ssh_check:
@@ -627,7 +730,8 @@ def main(argv: list[str] | None = None) -> int:
     # Persist a fresh (timestamped, never-overwritten) manifest before touching
     # anything, so a hard failure still leaves a record of what to redeploy.
     overview_file = args.overview_file or default_overview_file()
-    emit_overview(scale_sets, overview_file, dry_run=args.dry_run, reloaded_from=reload_from)
+    emit_overview(scale_sets, overview_file, dry_run=args.dry_run, reloaded_from=reload_from,
+                  kubeconfig=kubeconfig, kubeconfig_is_override=kubeconfig_is_override)
 
     print_plan(scale_sets, skip_install=args.skip_install_requirements, reload_from=reload_from)
 
@@ -639,9 +743,9 @@ def main(argv: list[str] | None = None) -> int:
             for s in scale_sets:
                 terminate(s, dry_run=True)
         if not args.skip_install_requirements:
-            install_requirements(None, None, dry_run=True)
+            install_requirements(None, None, dry_run=True, kubeconfig=kubeconfig_override)
         for s in scale_sets:
-            recreate(s, dry_run=True)
+            recreate(s, dry_run=True, kubeconfig=kubeconfig_override)
         _log("")
         _log("Dry run: no changes made.")
         return 0
@@ -679,14 +783,14 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_install_requirements:
         _log("")
         _log("Step: install-k8s-requirements.yaml")
-        install_requirements(vault_pw, become_pw, dry_run=False)
+        install_requirements(vault_pw, become_pw, dry_run=False, kubeconfig=kubeconfig_override)
 
     _log("")
     _log("Step: redeploying runner scale sets")
     failures: list[str] = []
     for s in scale_sets:
         try:
-            recreate(s, dry_run=False)
+            recreate(s, dry_run=False, kubeconfig=kubeconfig_override)
         except RedeployError as exc:
             failures.append(f"{s.label}: {exc}")
             _log(f"  ERROR redeploying {s.label}: {exc}")
