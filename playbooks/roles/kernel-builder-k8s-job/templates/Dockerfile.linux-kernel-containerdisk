@@ -11,18 +11,29 @@ ARG KERNEL_REF
 ARG KERNEL_TAG_OVERWRITE=""
 
 SHELL ["/bin/bash", "-c"]
-RUN PROXY_URL="${http_proxy:-${HTTP_PROXY:-}}"; \
-    if [ -n "$PROXY_URL" ]; then \
+#Where the proxy publishes its CA certificate. mitmproxy serves it from its
+#onboarding app, which is only reachable through the proxy itself.
+ARG MITMPROXY_CA_CERT_URL="http://mitm.it/cert/pem"
+RUN set -e; \
+    PROXY_URL="${http_proxy:-${HTTP_PROXY:-}}"; \
+    if [ -z "$PROXY_URL" ]; then \
+      echo "No proxy build args set, building with direct internet access."; \
+      echo "Behind a TLS-inspecting proxy every download below fails with a"; \
+      echo "self-signed certificate error. Pass --build-arg http_proxy"; \
+      echo "--build-arg https_proxy --build-arg no_proxy in that case."; \
+    else \
       echo "Proxy detected: $PROXY_URL"; \
-      if curl -sf http://mitm.it/cert/pem -o /tmp/mitmproxy-ca-cert.pem && \
-         grep -q "BEGIN CERTIFICATE" /tmp/mitmproxy-ca-cert.pem; then \
-        echo "Installing mitmproxy CA cert into trust store"; \
-        cp /tmp/mitmproxy-ca-cert.pem /etc/pki/ca-trust/source/anchors/; \
-        update-ca-trust; \
-      else \
-        echo "WARNING: Could not fetch mitmproxy CA cert from http://mitm.it/cert/pem"; \
+      if ! curl -sSfL "$MITMPROXY_CA_CERT_URL" -o /tmp/mitmproxy-ca-cert.pem || \
+         ! grep -q "BEGIN CERTIFICATE" /tmp/mitmproxy-ca-cert.pem; then \
+        echo "ERROR: could not fetch the proxy CA cert from $MITMPROXY_CA_CERT_URL" >&2; \
+        echo "Every TLS download in this build would fail with a self-signed" >&2; \
+        echo "certificate error, so fail here where the cause is still visible." >&2; \
+        exit 1; \
       fi; \
-      echo -e "proxy=$PROXY_URL" >> /etc/dnf/dnf.conf; \
+      echo "Installing mitmproxy CA cert into trust store"; \
+      cp /tmp/mitmproxy-ca-cert.pem /etc/pki/ca-trust/source/anchors/; \
+      update-ca-trust; \
+      echo "proxy=$PROXY_URL" >> /etc/dnf/dnf.conf; \
       printf '[http]\n\tproxy = %s\n' "$PROXY_URL" > /root/.gitconfig; \
     fi
 

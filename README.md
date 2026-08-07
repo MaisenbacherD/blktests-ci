@@ -230,9 +230,17 @@ certificate PEM file on the workstation. When this variable is defined, the
 3. Configure proxy environment variables so all CI traffic is routed through
    mitmproxy, which handles upstream TLS verification using the corporate CA.
 
-GitHub Actions workflows that run `docker build` against
-`Dockerfile.linux-kernel-containerdisk` should pass proxy build args so the
-Dockerfile can auto-discover the mitmproxy CA:
+`docker build` is the one place where the proxy environment does not carry
+over on its own: the build's `RUN` steps get proxy variables only from build
+args, not from the environment of the pod that invokes the build. Without them
+a build silently skips the CA installation and every download fails with
+`self-signed certificate in certificate chain`.
+
+The runner pods therefore ship a docker CLI configuration
+(`/home/runner/.docker/config.json`) with a `proxies` section, which makes the
+docker CLI populate those build args for every `docker build` automatically. A
+workflow only needs to pass them itself when it builds somewhere other than
+these runners:
 
 ```yaml
 docker build \
@@ -241,6 +249,12 @@ docker build \
   --build-arg no_proxy \
   ...
 ```
+
+`Dockerfile.linux-kernel-containerdisk` picks the proxy up from those args,
+fetches the mitmproxy CA from `http://mitm.it/cert/pem` (served by mitmproxy
+itself) and installs it into the image's trust store. If the proxy is set but
+the CA cannot be fetched, the build fails immediately instead of running into
+certificate errors further down.
 
 No SSL verification is disabled anywhere; the mitmproxy CA certificate is
 installed into the trust store of every component that needs it.

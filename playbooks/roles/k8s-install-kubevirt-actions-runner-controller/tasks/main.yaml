@@ -192,6 +192,33 @@
             "insecure-registries" : ["registry-service.docker-registry.svc.cluster.local"]
           }
 
+#`docker build` does not pass the runner pod's proxy environment into the
+#build's RUN steps. The docker CLI only derives proxy build args from its own
+#config file, so seed one for the runner: every workflow's `docker build` then
+#reaches the internet through mitmproxy without each workflow having to
+#remember `--build-arg http_proxy ...`.
+- name: "Install docker-cli-config configMap"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: docker-cli-config
+        namespace: gh-runner-{{ runner_set_name }}
+      data:
+        config.json: |
+          {
+            "proxies": {
+              "default": {
+                "httpProxy": "http://mitmproxy.mitmproxy.svc.cluster.local:8080",
+                "httpsProxy": "http://mitmproxy.mitmproxy.svc.cluster.local:8080",
+                "noProxy": "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,container-registry.local"
+              }
+            }
+          }
+  when: mitmproxy_enabled
+
 - name: "Install disable-hostdev-rom onDefineDomain hook ConfigMap"
   kubernetes.core.k8s:
     state: present
